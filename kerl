@@ -1,4 +1,4 @@
-#! /bin/sh
+#! /bin/bash
 
 # Copyright (c) 2016 Mark Allen
 # Copyright (c) 2011, 2012 Spawngrid, Inc
@@ -539,7 +539,10 @@ do_normal_build()
     fi
 
     echo "Building Erlang/OTP $1 ($2), please wait..."
-    _do_build "$1" "$2"
+
+    (_do_build "$1" "$2") &
+    display_spinner "$!"
+
     echo "Erlang/OTP $1 ($2) has been successfully built"
     list_add builds "$1,$2"
 }
@@ -1388,6 +1391,19 @@ tarball_download()
         exit 1
     fi
     echo "Checksum verified ($SUM)"
+}
+
+display_spinner()
+{
+    PID=$1
+    i=1
+    sp="/-\|"
+    while [ -d /proc/$PID ]
+    do
+        printf "\b${sp:i++%${#sp}:1}"
+        sleep 0.1
+    done
+    printf "\b\n"
 }
 
 apply_solaris_networking_patch()
