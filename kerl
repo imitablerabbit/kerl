@@ -539,9 +539,7 @@ do_normal_build()
     fi
 
     echo "Building Erlang/OTP $1 ($2), please wait..."
-
-    (_do_build "$1" "$2") &
-    display_spinner "$!"
+    _do_build "$1" "$2"    
 
     echo "Erlang/OTP $1 ($2) has been successfully built"
     list_add builds "$1,$2"
@@ -581,6 +579,44 @@ _flags()
             ;;
     esac
 
+}
+
+_check_config_hash() {    
+    read -r OLD_SUM < "./$KERL_CONFIG_STORAGE_FILENAME.md5" 
+    if [ "$SUM" != "$OLD_SUM" ]; then
+        echo "Configure options have changed. Reconfiguring..." 
+        rm -f configure 
+        mv "$TMPOPT" "./$KERL_CONFIG_STORAGE_FILENAME" 
+        echo "$SUM" > "./$KERL_CONFIG_STORAGE_FILENAME.md5"
+    else
+        # configure options are the same
+        rm -f "$TMPOPT"
+    fi
+}
+
+_generate_options_hash() {
+    TMPOPT="/tmp/kerloptions.$$"
+    echo "$CFLAGS" > "$TMPOPT"
+    echo "$KERL_CONFIGURE_OPTIONS" >> "$TMPOPT"
+    SUM=$($MD5SUM "$TMPOPT" | cut -d ' ' -f $MD5SUM_FIELD)
+}
+
+_configure_options() {
+    if [ "$1" != "git" ]; then
+        maybe_patch "$KERL_SYSTEM" "$1"
+    fi
+    if [ -n "$KERL_USE_AUTOCONF" ]; then
+        ./otp_build autoconf $KERL_CONFIGURE_OPTIONS >> "$LOGFILE" 2>&1 && \
+           _flags ./otp_build configure $KERL_CONFIGURE_OPTIONS >> "$LOGFILE" 2>&1
+    else
+        _flags ./otp_build configure $KERL_CONFIGURE_OPTIONS >> "$LOGFILE" 2>&1
+
+    fi
+    echo -n $KERL_CONFIGURE_OPTIONS | grep "--enable-native-libs" 1>/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        make clean >> "$LOGFILE" 2>&1
+        _flags ./otp_build configure $KERL_CONFIGURE_OPTIONS >> "$LOGFILE" 2>&1
+    fi
 }
 
 _do_build()
@@ -637,51 +673,28 @@ _do_build()
     LOGFILE="$KERL_BUILD_DIR/$2/otp_build_$1.log"
 
     # Check to see if configuration options need to be stored or have changed
-    TMPOPT="/tmp/kerloptions.$$"
-    echo "$CFLAGS" > "$TMPOPT"
-    echo "$KERL_CONFIGURE_OPTIONS" >> "$TMPOPT"
-    SUM=$($MD5SUM "$TMPOPT" | cut -d ' ' -f $MD5SUM_FIELD)
+    display_spinner "Generating kerl options hash." _generate_options_hash        
+    echo "Generated kerl options hash."
+
     # Check for a .kerl_config.md5 file
     if [ -e "./$KERL_CONFIG_STORAGE_FILENAME.md5" ]; then
         # Compare our current options to the saved ones
-        read -r OLD_SUM < "./$KERL_CONFIG_STORAGE_FILENAME.md5"
-        if [ "$SUM" != "$OLD_SUM" ]; then
-            echo "Configure options have changed. Reconfiguring..."
-            rm -f configure
-            mv "$TMPOPT" "./$KERL_CONFIG_STORAGE_FILENAME"
-            echo "$SUM" > "./$KERL_CONFIG_STORAGE_FILENAME.md5"
-        else
-            # configure options are the same
-            rm -f "$TMPOPT"
-        fi
+        display_spinner "Detecting configuration changes." _check_config_hash
     else
-	# no file exists, so write one
-	mv "$TMPOPT" ./.kerl_config
-	echo "$SUM" > ./.kerl_config.md5
+        # no file exists, so write one
+        mv "$TMPOPT" ./.kerl_config
+        echo "$SUM" > ./.kerl_config.md5
     fi
 
     # Don't apply patches to "custom" git builds. We have no idea if they will apply
     # cleanly or not.
-    if [ "$1" != "git" ]; then
-        maybe_patch "$KERL_SYSTEM" "$1"
-    fi
-    if [ -n "$KERL_USE_AUTOCONF" ]; then
-        ./otp_build autoconf $KERL_CONFIGURE_OPTIONS >> "$LOGFILE" 2>&1 && \
-           _flags ./otp_build configure $KERL_CONFIGURE_OPTIONS >> "$LOGFILE" 2>&1
-    else
-        _flags ./otp_build configure $KERL_CONFIGURE_OPTIONS >> "$LOGFILE" 2>&1
-
-    fi
-    echo -n $KERL_CONFIGURE_OPTIONS | grep "--enable-native-libs" 1>/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        make clean >> "$LOGFILE" 2>&1
-        _flags ./otp_build configure $KERL_CONFIGURE_OPTIONS >> "$LOGFILE" 2>&1
-    fi
+    display_spinner "Configuring options." _configure_options
     if [ $? -ne 0 ]; then
         show_logfile "Configure failed." "$LOGFILE"
         list_remove builds "$1 $2"
         exit 1
     fi
+    echo "Successfully configured options."
 
     for SECTION in "APPLICATIONS DISABLED" \
                    "APPLICATIONS INFORMATION" \
@@ -690,7 +703,10 @@ _do_build()
     done
 
     if [ -n "$KERL_CONFIGURE_APPLICATIONS" ]; then
-        find ./lib -maxdepth 1 -type d -exec touch -f {}/SKIP \;
+
+        display_spinner "Configuring application." "find ./lib -maxdepth 1 -type d -exec touch -f {}/SKIP \;"
+        echo "Successfully configured application."
+
         for i in $KERL_CONFIGURE_APPLICATIONS; do
             rm ./lib/"$i"/SKIP
             if [ $? -ne 0 ]; then
@@ -710,7 +726,7 @@ _do_build()
         done
     fi
 
-    _flags ./otp_build boot -a $KERL_CONFIGURE_OPTIONS >> "$LOGFILE" 2>&1
+    display_spinner "Building Erlang/OTP." "_flags ./otp_build boot -a $KERL_CONFIGURE_OPTIONS >> \"$LOGFILE\" 2>&1"
     if [ $? -ne 0 ]; then
         show_logfile "Build failed." "$LOGFILE"
         list_remove builds "$1 $2"
@@ -731,10 +747,13 @@ _do_build()
             exit 1
         fi
     fi
-    rm -f "$LOGFILE"
-    ERL_TOP="$ERL_TOP" ./otp_build release -a "$KERL_BUILD_DIR/$2/release_$1" > /dev/null 2>&1
-    cd "$KERL_BUILD_DIR/$2/release_$1" || exit 1
-    ./Install $INSTALL_OPT "$KERL_BUILD_DIR/$2/release_$1" > /dev/null 2>&1
+
+    display_spinner "Installing." \
+        rm -f "$LOGFILE" \
+        ERL_TOP="$ERL_TOP" ./otp_build release -a "$KERL_BUILD_DIR/$2/release_$1" > /dev/null 2>&1 \
+        cd "$KERL_BUILD_DIR/$2/release_$1" || exit 1 \
+        ./Install $INSTALL_OPT "$KERL_BUILD_DIR/$2/release_$1" > /dev/null 2>&1
+    
 }
 
 do_install()
@@ -1393,17 +1412,30 @@ tarball_download()
     echo "Checksum verified ($SUM)"
 }
 
+# Display a spinner for the time that a process is alive for.
+# This function should take 2 args, the first is the text that should
+# appear next to the spinner, then the command that the spinner should execute.
 display_spinner()
 {
-    PID=$1
-    i=1
-    sp="/-\|"
+    TEXT=$1
+    INDEX=1
+    SPINNER="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    shift
+    ($@) &
+    PID="$!"
+
+    # Print the spinner on a single line for the duration of the command.
+    tput sc
     while [ -d /proc/$PID ]
     do
-        printf "\b${sp:i++%${#sp}:1}"
+        echo -ne "${SPINNER:INDEX++%${#SPINNER}:1} $TEXT"
         sleep 0.1
+        tput el1
+        tput rc
     done
-    printf "\b\n"
+
+    # Return the same as the command run
+    return `wait $PID`
 }
 
 apply_solaris_networking_patch()
